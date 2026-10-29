@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: selfcheck-scanner
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 --timeout 60 -b 0.0.0.0:$PORT selfcheck:app
+    envVars:
+      - key: SELFCHECK_PUBLIC
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.12.7"

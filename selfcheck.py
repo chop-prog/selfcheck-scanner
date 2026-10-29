@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Локальный self-check сайта и файлов.
-Только 127.0.0.1, никаких токенов.
+Self-check сайта и файлов.
+Локально слушает 127.0.0.1, никаких токенов.
+На публичном хостинге (SELFCHECK_PUBLIC=1) запрещает сканировать внутренние адреса.
 """
 import os
 import re
@@ -9,6 +10,7 @@ import ssl
 import socket
 import time
 import datetime
+import ipaddress
 from urllib.parse import urlparse
 
 import certifi
@@ -41,7 +43,39 @@ def normalize(raw):
     p = urlparse(raw)
     if p.scheme not in ("http", "https") or not p.hostname:
         raise ValueError("Некорректный URL")
+    check_public_host(p.hostname)
     return p
+
+
+PUBLIC_MODE = bool(os.environ.get("SELFCHECK_PUBLIC"))
+
+
+def check_public_host(host):
+    """В публичном режиме не даём сканеру ходить на localhost, внутреннюю сеть
+    хостинга и metadata-адреса облака (защита от SSRF)."""
+    if not PUBLIC_MODE:
+        return
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror:
+        raise ValueError("Не удалось найти такой домен")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global:
+            raise ValueError("Сканировать внутренние и локальные адреса "
+                             "в онлайн-версии нельзя")
+
+
+class GuardedSession(requests.Session):
+    """Проверяет каждый редирект: внешний сайт не должен перенаправить
+    сканер на внутренний адрес."""
+    def get_redirect_target(self, resp):
+        target = super().get_redirect_target(resp)
+        if target:
+            host = urlparse(requests.compat.urljoin(resp.url, target)).hostname
+            if host:
+                check_public_host(host)
+        return target
 
 
 def tls_days(host, port=443):
@@ -80,8 +114,9 @@ def scan_url(raw):
 
     t0 = time.perf_counter()
     try:
-        r = requests.get(p.geturl(), timeout=TIMEOUT, allow_redirects=True,
-                         headers={"User-Agent": "selfcheck/1.0"})
+        with GuardedSession() as s:
+            r = s.get(p.geturl(), timeout=TIMEOUT, allow_redirects=True,
+                      headers={"User-Agent": "selfcheck/1.0"})
         _ = r.content  # дочитываем тело, чтобы время было полным
         elapsed = time.perf_counter() - t0
     except requests.exceptions.SSLError as e:
@@ -2237,4 +2272,4 @@ def index():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", 5000)), debug=False)
